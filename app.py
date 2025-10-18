@@ -38,8 +38,10 @@ DEMO_CSV = """date,league,home,away,home_strength,away_strength,home_shots_rate,
 
 def load_demo_today():
     df = pd.read_csv(StringIO(DEMO_CSV), parse_dates=['date'])
-    df['date'] = pd.to_datetime(dt.date.today()).dt.date
+    # On remplace la colonne 'date' par la date du jour
+    df['date'] = pd.to_datetime("today").normalize().date()
     return df[df['date'] == dt.date.today()].reset_index(drop=True)
+
 
 # =========================
 # LIVE fixtures du jour
