@@ -15,8 +15,8 @@ MAX_ODDS_TEAM = 5.0
 MAX_ODDS_PLAYER = 3.5
 KELLY_FRACTION_TEAM = 0.5
 KELLY_FRACTION_PLAYER = 0.5
-STAKE_MIN = 0.0025   # 0.25% de bankroll
-STAKE_MAX = 0.02     # 2% de bankroll
+STAKE_MIN = 0.0025   # 0.25% bankroll
+STAKE_MAX = 0.02     # 2% bankroll
 
 COMBO_ODDS_MIN = 3.5
 COMBO_ODDS_MAX = 7.0
@@ -25,6 +25,7 @@ COMBO_STAKE_MIN = 0.0025
 COMBO_STAKE_MAX = 0.005
 
 # Compétitions à afficher en LIVE (codes football-data.org)
+# Ajoute d'autres codes si tu veux (ex: "CL","BL1","SA","DED")
 LIVE_COMP_IDS = ["PL", "PD", "FL1"]  # Premier League, LaLiga, Ligue 1
 
 # =========================
@@ -36,15 +37,15 @@ DEMO_CSV = """date,league,home,away,home_strength,away_strength,home_shots_rate,
 2025-10-18,FRA,Lyon,Monaco,1.15,1.2,5.3,5.1,5.9,6.1,Alexandre Lacazette,3.2,Wissam Ben Yedder,2.5,2.50,3.50,2.90,2.10,1.75,1.90,1.90,2.05,1.80,1.95,1.75,2.15,1.70
 """
 
-def load_demo_today():
+def load_demo_for(target_date: dt.date) -> pd.DataFrame:
+    """Redate les matchs de démo vers la date choisie (J/J+1/J+2)."""
     df = pd.read_csv(StringIO(DEMO_CSV), parse_dates=['date'])
-    # On remplace la colonne 'date' par la date du jour
-    df['date'] = pd.to_datetime("today").normalize().date()
-    return df[df['date'] == dt.date.today()].reset_index(drop=True)
-
+    df['date'] = pd.to_datetime(target_date).date()
+    df['date'] = pd.to_datetime(df['date']).dt.date
+    return df[df['date'] == target_date].reset_index(drop=True)
 
 # =========================
-# LIVE fixtures du jour
+# LIVE fixtures pour une date donnée
 # =========================
 def get_secret(key):
     try:
@@ -52,15 +53,15 @@ def get_secret(key):
     except Exception:
         return os.getenv(key)
 
-def load_live_fixtures():
+def load_live_fixtures(target_date: dt.date):
     """Retourne (df, message). df=None si indisponible."""
     api_key = get_secret("FOOTBALL_DATA_API_KEY")
     if not api_key:
         return None, "Pas de clé FOOTBALL_DATA_API_KEY — mode démo utilisé."
 
-    today = dt.date.today().isoformat()
+    day = target_date.isoformat()
     url = "https://api.football-data.org/v4/matches"
-    params = {"dateFrom": today, "dateTo": today, "competitions": ",".join(LIVE_COMP_IDS)}
+    params = {"dateFrom": day, "dateTo": day, "competitions": ",".join(LIVE_COMP_IDS)}
     headers = {"X-Auth-Token": api_key}
 
     try:
@@ -69,17 +70,15 @@ def load_live_fixtures():
         data = r.json()
         matches = data.get("matches", [])
         if not matches:
-            return None, "Aucun match trouvé aujourd'hui pour PL/PD/FL1 — mode démo utilisé."
+            return None, f"Aucun match trouvé le {day} pour {','.join(LIVE_COMP_IDS)} — mode démo utilisé."
 
         rows = []
         for m in matches:
             comp = m.get("competition", {}).get("code", "") or "LIVE"
             home = m.get("homeTeam", {}).get("name", "")
             away = m.get("awayTeam", {}).get("name", "")
-
-            # PROXIES de cotes (football-data.org ne fournit pas d’odds gratuites)
             rows.append(dict(
-                date=today, league=comp,
+                date=day, league=comp,
                 home=home, away=away,
                 home_strength=1.10, away_strength=1.00,
                 home_shots_rate=5.2, away_shots_rate=4.9,
@@ -88,6 +87,7 @@ def load_live_fixtures():
                 player_home_shots90=2.4,
                 player_away=(away.split()[0] if away else "Extérieur"),
                 player_away_shots90=2.1,
+                # Proxies de cotes (pas d'odds gratuites sur football-data.org)
                 odds_home=2.30, odds_draw=3.30, odds_away=2.90,
                 odds_ou25_over=1.95, odds_ou25_under=1.85,
                 odds_teamshots_home_over45=1.95, odds_teamshots_home_under45=1.85,
@@ -97,10 +97,10 @@ def load_live_fixtures():
             ))
         return pd.DataFrame(rows), None
     except Exception as e:
-        return None, f"Erreur API fixtures : {e}"
+        return None, f"Erreur API fixtures ({day}) : {e}"
 
 # =========================
-# Modèles simples
+# Modèles ultra-simples
 # =========================
 def win_probs_from_strength(home_strength: float, away_strength: float, home_adv: float=0.15):
     diff = (home_strength + home_adv) - away_strength
@@ -121,10 +121,10 @@ def poisson_tail(lmbda: float, k_threshold: int):
         cdf += np.exp(-lmbda) * (lmbda**k)/np.math.factorial(k)
     return 1 - cdf
 
-def ou25_probs(home_strength, away_strength):
+def ou25_probs(hs, as_):
     base = 1.35
-    gh = base * home_strength * 1.05
-    ga = base * away_strength * 0.95
+    gh = base * hs * 1.05
+    ga = base * as_ * 0.95
     lam_total = gh + ga
     p_over = poisson_prob_over(lam_total)
     return p_over, 1 - p_over
@@ -170,7 +170,7 @@ def capped_stake_pct(p: float, odds: float, kelly_frac_base: float, min_pct: flo
 st.set_page_config(page_title="Football Edge (MVP)", page_icon="⚽", layout="centered")
 st.title("⚽ Football Edge — MVP")
 
-# Affiche si la clé est détectée (utile pour debug)
+# Clé API détectée ?
 has_key = False
 try:
     has_key = bool(st.secrets.get("FOOTBALL_DATA_API_KEY"))
@@ -178,19 +178,31 @@ except Exception:
     pass
 st.caption(f"🔐 Clé API détectée : {'oui' if has_key else 'non'}")
 
+# Sélecteur de source + date (J / J+1 / J+2)
 mode = st.radio("Source des matchs du jour :", ["Live (API fixtures)", "Démo (exemples)"], index=0)
+colA, colB = st.columns([1,2])
+with colA:
+    day_choice = st.selectbox("Jour :", ["Aujourd'hui (J)", "Demain (J+1)", "Après-demain (J+2)"], index=0)
+delta = {"Aujourd'hui (J)": 0, "Demain (J+1)": 1, "Après-demain (J+2)": 2}[day_choice]
+TARGET_DATE = dt.date.today() + dt.timedelta(days=delta)
+st.caption(f"📅 Date visée : {TARGET_DATE.isoformat()}")
 
+# Charger fixtures
 df = None
 note = ""
 if mode.startswith("Live"):
-    df, note = load_live_fixtures()
+    df, note = load_live_fixtures(TARGET_DATE)
     if note:
         st.warning(note)
 if df is None or df.empty:
-    df = load_demo_today()
+    df = load_demo_for(TARGET_DATE)
     st.caption("Mode démo actif.")
 
 # Liste des matchs
+if df.empty:
+    st.info("Aucun match à afficher pour cette date.")
+    st.stop()
+
 df_show = df[['league','home','away']].copy()
 df_show.index = [f"Match #{i+1}" for i in range(len(df_show))]
 st.subheader("Matchs du jour")
@@ -208,7 +220,7 @@ with col2:
 if go_match:
     r = df.iloc[idx-1]
     st.markdown("---")
-    st.header(f"🎯 Pari conseillé — {r['league']} • {r['home']} vs {r['away']}")
+    st.header(f"🎯 Pari conseillé — {r['league']} • {r['home']} vs {r['away']} ({TARGET_DATE.isoformat()})")
     options = []
 
     # 1X2
@@ -259,7 +271,7 @@ if go_match:
 # --------- COMBINÉ DU JOUR ---------
 if go_combo:
     st.markdown("---")
-    st.header("🎟️ Combiné du jour")
+    st.header(f"🎟️ Combiné du jour — {TARGET_DATE.isoformat()}")
     singles = []
     for _, r in df.iterrows():
         mid = f"{r.home}-{r.away}"
@@ -308,11 +320,9 @@ if go_combo:
     combo, combo_odds, combo_p = [], 1.0, 1.0
     used = set()
     for mkt, sel, odds, p, ev, conf, mid in valid:
-        if mid in used: 
-            continue
+        if mid in used: continue
         potential = combo_odds * odds
-        if potential > COMBO_ODDS_MAX: 
-            continue
+        if potential > COMBO_ODDS_MAX: continue
         combo.append((mkt, sel, odds, p, ev, conf, mid))
         used.add(mid)
         combo_odds *= odds
